@@ -4,11 +4,49 @@
 const request = require('request'),
   express = require('express'),
   body_parser = require('body-parser'),
-  access_token = process.env.ACCESS_TOKEN,
-  app = express().use(body_parser.json()); // creates express http server
+  dotenv = require('dotenv').config();
 
-// Sets server port and logs message on success
-app.listen(process.env.PORT || 5000, () => console.log('webhook is listening'));
+var app = express();
+
+app.set('port', process.env.PORT || 5000);
+app.use(body_parser.json());
+app.use(express.static('public'));
+
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const SERVER_URL = process.env.SERVER_URL;
+const APP_SECRET = process.env.APP_SECRET;
+
+app.listen(app.get('port'), () => {
+  console.log('Node app is running on port', app.get('port'));
+});
+
+module.exports = app;
+
+// Serve the options path and set required headers
+app.get('/options', (req, res, next) => {
+  let referer = req.get('Referer');
+  if (referer) {
+    if (referer.indexOf('www.messenger.com') >= 0) {
+      res.setHeader('X-Frame-Options', 'ALLOW-FROM https://www.messenger.com/');
+    } else if (referer.indexOf('www.facebook.com') >= 0) {
+      res.setHeader('X-Frame-Options', 'ALLOW-FROM https://www.facebook.com/');
+    }
+    res.sendFile('public/options.html', { root: __dirname });
+  }
+});
+
+// Handle postback from webview
+app.get('/optionspostback', (req, res) => {
+  let body = req.query;
+  let response = {
+    text: `Great, I will book you a ${body.bed} bed, with ${body.pillows} pillows and a ${body.view} view.`
+  };
+
+  res
+    .status(200)
+    .send('Please close this window to return to the conversation thread.');
+  callSendAPI(body.psid, response);
+});
 
 // Accepts POST requests at the /webhook endpoint
 app.post('/webhook', (req, res) => {
@@ -18,21 +56,20 @@ app.post('/webhook', (req, res) => {
   // Check the webhook event is from a Page subscription
   if (body.object === 'page') {
     body.entry.forEach(entry => {
-      if (entry.messaging) {
-        // Gets the body of the webhook event
-        let webhook_event = entry.messaging[0];
+      // Gets the body of the webhook event
+      let webhook_event = entry.messaging[0];
+      console.log(webhook_event);
 
-        // Get the sender PSID
-        let sender_psid = webhook_event.sender.id;
-        console.log(`Sender PSID: ${sender_psid}`);
+      // Get the sender PSID
+      let sender_psid = webhook_event.sender.id;
+      console.log(`Sender PSID: ${sender_psid}`);
 
-        // Check if the event is a message or postback and
-        // pass the event to the appropriate handler function
-        if (webhook_event.message) {
-          handleMessage(sender_psid, webhook_event.message);
-        }
-      } else if (entry.changes) {
-        processComments(entry.changes[0].value);
+      // Check if the event is a message or postback and
+      // pass the event to the appropriate handler function
+      if (webhook_event.message) {
+        handleMessage(sender_psid, webhook_event.message);
+      } else if (webhook_event.postback) {
+        handlePostback(sender_psid, webhook_event.postback);
       }
     });
 
@@ -44,39 +81,9 @@ app.post('/webhook', (req, res) => {
   }
 });
 
-// Processes incoming posts to page to get ID of the poster
-function processComments(comment) {
-  let comment_id;
-  if (comment.item == 'post') {
-    comment_id = comment.post_id;
-  } else if (comment.item == 'comment') {
-    comment_id = comment.comment_id;
-  }
-  console.log('id: ' + comment_id);
-  let encode_message = encodeURIComponent(comment.message);
-  let message_body = `Thank you for your question, to better assist you I am passing you to our support department. Click the link below to be transferred. https://m.me/acmeincsupport?ref=${encode_message}`;
-  let request_body = {
-    message: message_body
-  };
-  request(
-    {
-      uri: `https://graph.facebook.com/v2.12/${comment_id}/private_replies`,
-      qs: { access_token: access_token },
-      method: 'POST',
-      json: request_body
-    },
-    (err, res) => {
-      if (!err) {
-        console.log('Private reply sent');
-      }
-    }
-  );
-}
-
 // Accepts GET requests at the /webhook endpoint
 app.get('/webhook', (req, res) => {
-  console.log(req);
-  const verify_token = process.env.VERIFY_TOKEN;
+  const VERIFY_TOKEN = process.env.TOKEN;
 
   // Parse params from the webhook verification request
   let mode = req.query['hub.mode'];
@@ -86,7 +93,7 @@ app.get('/webhook', (req, res) => {
   // Check if a token and mode were sent
   if (mode && token) {
     // Check the mode and token sent are correct
-    if (mode === 'subscribe' && token === verify_token) {
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       // Respond with 200 OK and challenge token from the request
       console.log('WEBHOOK_VERIFIED');
       res.status(200).send(challenge);
@@ -97,6 +104,63 @@ app.get('/webhook', (req, res) => {
   }
 });
 
+// Handles messages events
+function handleMessage(sender_psid, received_message) {
+  let response;
+
+  // Checks if the message contains text
+  if (received_message.text) {
+    switch (
+      received_message.text
+        .replace(/[^\w\s]/gi, '')
+        .trim()
+        .toLowerCase()
+    ) {
+      case 'room preferences':
+        response = setRoomPreferences(sender_psid);
+        break;
+      default:
+        response = {
+          text: `You sent the message: "${received_message.text}".`
+        };
+        break;
+    }
+  } else {
+    response = {
+      text: `Sorry, I don't understand what you mean.`
+    };
+  }
+
+  // Send the response message
+  callSendAPI(sender_psid, response);
+}
+
+// Define the template and webview
+function setRoomPreferences(sender_psid) {
+  let response = {
+    attachment: {
+      type: 'template',
+      payload: {
+        template_type: 'button',
+        text:
+          "OK, let's set your room preferences so I won't need to ask for them in the future.",
+        buttons: [
+          {
+            type: 'web_url',
+            url: SERVER_URL + '/options',
+            title: 'Set preferences',
+            webview_height_ratio: 'compact',
+            messenger_extensions: true
+          }
+        ]
+      }
+    }
+  };
+
+  return response;
+}
+
+// Sends response messages via the Send API
 function callSendAPI(sender_psid, response) {
   // Construct the message body
   let request_body = {
@@ -105,12 +169,12 @@ function callSendAPI(sender_psid, response) {
     },
     message: response
   };
-
+  console.log(request_body);
   // Send the HTTP request to the Messenger Platform
   request(
     {
       uri: 'https://graph.facebook.com/v2.6/me/messages',
-      qs: { access_token: access_token },
+      qs: { access_token: PAGE_ACCESS_TOKEN },
       method: 'POST',
       json: request_body
     },
