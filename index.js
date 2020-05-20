@@ -1,51 +1,93 @@
 'use strict';
 
 // Imports dependencies and set up http server
-const express = require('express'),
-  bodyParser = require('body-parser'),
-  app = express().use(bodyParser.json()); // creates express http server
+const request = require('request'),
+  express = require('express'),
+  body_parser = require('body-parser'),
+  access_token = process.env.ACCESS_TOKEN,
+  app = express().use(body_parser.json()); // creates express http server
 
 // Sets server port and logs message on success
-app.listen(process.env.PORT || 1337, () => console.log('webhook is listening'));
+app.listen(process.env.PORT || 5000, () => console.log('webhook is listening'));
 
-// Creates the endpoint for our webhook
+// Accepts POST requests at the /webhook endpoint
 app.post('/webhook', (req, res) => {
+  // Parse the request body from the POST
   let body = req.body;
 
-  // Checks this is an event from a page subscription
+  // Check the webhook event is from a Page subscription
   if (body.object === 'page') {
-    // Iterates over each entry - there may be multiple if batched
-    body.entry.forEach(function (entry) {
-      // Gets the message. entry.messaging is an array, but
-      // will only ever contain one message, so we get index 0
-      let webhook_event = entry.messaging[0];
-      //console.log(webhook_event);
-      //let comment = entry.comment[0];
-      console.log(entry);
+    body.entry.forEach(entry => {
+      if (entry.messaging) {
+        // Gets the body of the webhook event
+        let webhook_event = entry.messaging[0];
+
+        // Get the sender PSID
+        let sender_psid = webhook_event.sender.id;
+        console.log(`Sender PSID: ${sender_psid}`);
+
+        // Check if the event is a message or postback and
+        // pass the event to the appropriate handler function
+        if (webhook_event.message) {
+          handleMessage(sender_psid, webhook_event.message);
+        }
+      } else if (entry.changes) {
+        processComments(entry.changes[0].value);
+      }
     });
 
-    // Returns a '200 OK' response to all requests
+    // Return a '200 OK' response to all events
     res.status(200).send('EVENT_RECEIVED');
   } else {
-    // Returns a '404 Not Found' if event is not from a page subscription
+    // Return a '404 Not Found' if event is not from a page subscription
     res.sendStatus(404);
   }
 });
-// Adds support for GET requests to our webhook
-app.get('/webhook', (req, res) => {
-  // Your verify token. Should be a random string.
-  let VERIFY_TOKEN = 'dlaregehsobam2160';
 
-  // Parse the query params
+// Processes incoming posts to page to get ID of the poster
+function processComments(comment) {
+  let comment_id;
+  if (comment.item == 'post') {
+    comment_id = comment.post_id;
+  } else if (comment.item == 'comment') {
+    comment_id = comment.comment_id;
+  }
+  console.log('id: ' + comment_id);
+  let encode_message = encodeURIComponent(comment.message);
+  let message_body = `Thank you for your question, to better assist you I am passing you to our support department. Click the link below to be transferred. https://m.me/acmeincsupport?ref=${encode_message}`;
+  let request_body = {
+    message: message_body
+  };
+  request(
+    {
+      uri: `https://graph.facebook.com/v2.12/${comment_id}/private_replies`,
+      qs: { access_token: access_token },
+      method: 'POST',
+      json: request_body
+    },
+    (err, res) => {
+      if (!err) {
+        console.log('Private reply sent');
+      }
+    }
+  );
+}
+
+// Accepts GET requests at the /webhook endpoint
+app.get('/webhook', (req, res) => {
+  console.log(req);
+  const verify_token = process.env.VERIFY_TOKEN;
+
+  // Parse params from the webhook verification request
   let mode = req.query['hub.mode'];
   let token = req.query['hub.verify_token'];
   let challenge = req.query['hub.challenge'];
 
-  // Checks if a token and mode is in the query string of the request
+  // Check if a token and mode were sent
   if (mode && token) {
-    // Checks the mode and token sent is correct
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      // Responds with the challenge token from the request
+    // Check the mode and token sent are correct
+    if (mode === 'subscribe' && token === verify_token) {
+      // Respond with 200 OK and challenge token from the request
       console.log('WEBHOOK_VERIFIED');
       res.status(200).send(challenge);
     } else {
@@ -54,3 +96,30 @@ app.get('/webhook', (req, res) => {
     }
   }
 });
+
+function callSendAPI(sender_psid, response) {
+  // Construct the message body
+  let request_body = {
+    recipient: {
+      id: sender_psid
+    },
+    message: response
+  };
+
+  // Send the HTTP request to the Messenger Platform
+  request(
+    {
+      uri: 'https://graph.facebook.com/v2.6/me/messages',
+      qs: { access_token: access_token },
+      method: 'POST',
+      json: request_body
+    },
+    (err, res, body) => {
+      if (!err) {
+        console.log('message sent!');
+      } else {
+        console.error('Unable to send message:' + err);
+      }
+    }
+  );
+}
